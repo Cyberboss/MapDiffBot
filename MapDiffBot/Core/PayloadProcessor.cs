@@ -684,20 +684,40 @@ namespace MapDiffBot.Core
 				var gitHubManager = scope.ServiceProvider.GetRequiredService<IGitHubManager>();
 				var cancellationToken = jobCancellationToken.ShutdownToken;
 				var checkRuns = await gitHubManager.GetMatchingCheckRuns(repositoryId, checkSuiteId, cancellationToken).ConfigureAwait(false);
-				bool testedAny = false;
+				var scannedPrs = new List<int>();
 
-				await Task.WhenAll(checkRuns.Select(x =>
+				var derivedTask = Task.WhenAll(checkRuns.Select(x =>
 				{
 					var result = GetPullRequestNumberFromCheckRun(x);
 					if (result.HasValue)
 					{
-						testedAny = true;
+						scannedPrs.Add(result.Value);
 						return ScanPullRequestImpl(repositoryId, result.Value, scope, cancellationToken);
 					}
 					return Task.CompletedTask;
-				})).ConfigureAwait(false);
+				}));
 
-				if (!testedAny)
+				//check runs will 99.999999% of the time have at least one entry
+				//we don't care about the other times
+
+				Task innateTask;
+				if (checkRuns.Any())
+				{
+					var checkRun = checkRuns[0];
+					innateTask = Task.WhenAll(checkRun.CheckSuite.PullRequests.Select(x =>
+					{
+						if (scannedPrs.Contains(x.Number))
+							return Task.CompletedTask;
+						scannedPrs.Add(x.Number);
+						return ScanPullRequestImpl(repositoryId, x.Number, scope, cancellationToken);
+					}));
+				}
+				else
+					innateTask = Task.CompletedTask;
+
+				await Task.WhenAll(derivedTask, innateTask).ConfigureAwait(false);
+
+				if (scannedPrs.Count == 0)
 					await CreateUnassociatedCheck(repositoryId, gitHubManager, checkSuiteSha, cancellationToken).ConfigureAwait(false);
 			}
 		}
